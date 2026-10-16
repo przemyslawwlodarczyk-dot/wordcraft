@@ -18,6 +18,11 @@ on:
 permissions:
   contents: read
 
+# Nowy push na gałąź przerywa poprzedni, jeszcze trwający build.
+concurrency:
+  group: mycrm-web-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: never
   ENGINE: word

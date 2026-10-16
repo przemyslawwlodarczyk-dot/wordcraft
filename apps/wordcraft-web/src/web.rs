@@ -32,10 +32,10 @@ pub fn start() {
         if let Err(e) = guard_unload(dirty.clone(), saves.clone()) {
             log::error!("no unsaved-changes guard: {e}");
         }
-        // The embedding page owns the document: it opens and saves through `host.rs`.
-        let host = crate::host::enabled();
-        let host_dirty = dirty.clone();
-        let host_saves = saves.clone();
+        // `?host=parent`: a same-origin page framing WordCraft opens the document in it and stores
+        // what it saves (`host.rs`).
+        let bridge = if query_param("host").as_deref() == Some("parent") { crate::host::Bridge::new(saves.clone()) } else { None };
+        let app_bridge = bridge.clone();
         let mut options = eframe::WebOptions::default();
         if query().contains("webgl")
             && let eframe::egui_wgpu::WgpuSetup::CreateNew(create) = &mut options.wgpu_options.wgpu_setup
@@ -60,41 +60,36 @@ pub fn start() {
                     // The browser's locale picks the new document's paper, the units and the
                     // decimal separator (#838).
                     let region = wordcraft_ui_egui::i18n::system_region();
-                    let sample = query().contains("sample");
+                    // In host mode the parent sends the document to edit; no sample meanwhile.
+                    let sample = app_bridge.is_none() && query().contains("sample");
                     let doc = if sample { wordcraft_engine::sample::sample_document() } else { wordcraft_engine::blank_document(&region) };
                     let mut session = Session::new(doc);
                     session.system_region = region;
                     let messages = Rc::new(RefCell::new(Vec::new()));
                     let mut services = services(inbox.clone(), cc.egui_ctx.clone(), dirty, saves.clone(), messages.clone());
-                    if host {
-                        // Saves and exports go to the host; documents come only from it (pictures,
-                        // fonts and recipient lists still come from the browser's picker).
-                        services.download = Some(Box::new(crate::host::download));
-                        let picker = services.open_async.take();
-                        services.open_async = Some(Box::new(move |purpose: &str| {
-                            if purpose == "document" {
-                                log::info!("host mode: File › Open is the host's; ignored");
-                                return;
-                            }
-                            if let Some(p) = &picker {
-                                p(purpose);
-                            }
-                        }));
+                    if let Some(bridge) = &app_bridge {
+                        bridge.connect(&mut services, inbox.clone(), cc.egui_ctx.clone());
                     }
                     let mut app = WordApp::new(session, services);
                     // Pasted pictures wait apart from dropped files: the app inserts one only when the page is the edit target (#1349).
                     app.services.pasted = Some(pasted);
                     app.autosave = false;
-                    if host {
-                        crate::host::attach(inbox.clone(), cc.egui_ctx.clone(), host_saves, host_dirty);
+                    if let Some(bridge) = &app_bridge {
+                        if let Some(author) = query_param("author") {
+                            crate::host::Bridge::set_author(&mut app, &author);
+                        }
+                        bridge.post_ready();
                     } else if !sample {
                         // No document to show: start on File › Home, as the desktop app does (#766).
                         app.start_screen();
                     }
-                    Ok(Box::new(WebShell { app, inbox, messages, host }))
+                    Ok(Box::new(WebShell { app, inbox, messages, bridge: app_bridge }))
                 }),
             )
             .await;
+        if let (Err(e), Some(bridge)) = (&result, &bridge) {
+            bridge.post_failed(&format!("{e:?}"));
+        }
         if let Some(el) = document.get_element_by_id(LOADING_ID) {
             match result {
                 Ok(()) => el.remove(),
@@ -106,6 +101,10 @@ pub fn start() {
 
 fn query() -> String {
     web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default()
+}
+
+fn query_param(key: &str) -> Option<String> {
+    web_sys::UrlSearchParams::new_with_str(&query()).ok()?.get(key)
 }
 
 /// Whether a file name is a picture's (the formats Insert › Pictures takes).
@@ -120,8 +119,8 @@ struct WebShell {
     app: WordApp,
     inbox: Inbox,
     messages: Rc<RefCell<Vec<String>>>,
-    /// Host mode (`host.rs`): the page owns the document, so a dropped document is ignored.
-    host: bool,
+    /// Host mode (`host.rs`): the parent page owns the document, so a dropped document is ignored.
+    bridge: Option<crate::host::Bridge>,
 }
 
 impl eframe::App for WebShell {
@@ -129,7 +128,7 @@ impl eframe::App for WebShell {
         let dropped = ctx.input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
         for f in dropped {
             let name = f.path().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "dropped".into());
-            if self.host && !is_picture_name(&name) {
+            if self.bridge.is_some() && !is_picture_name(&name) {
                 self.app.status(wordcraft_ui_egui::i18n::t("Open the document from the application, not by dropping it here"));
                 continue;
             }
@@ -149,10 +148,10 @@ impl eframe::App for WebShell {
         for msg in msgs {
             self.app.status(msg);
         }
-        if self.host {
-            crate::host::drain_commands(&mut self.app);
-        }
         self.app.logic(ctx);
+        if let Some(bridge) = &self.bridge {
+            bridge.sync(&mut self.app);
+        }
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {

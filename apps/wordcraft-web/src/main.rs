@@ -6,8 +6,10 @@
 //!
 //! Differences from the desktop app: no TCP control channel; Open and Insert › Pictures use the
 //! browser file picker (bytes arrive through `Services::inbox`); Save and Export download.
-//! URL flags: `?webgl` forces WebGL2; `?sample` opens the sample document; `?host=1` lets the
-//! embedding page supply the document and take the saves (see `host.rs`).
+//! URL flags: `?webgl` forces WebGL2; `?sample` opens the sample document; `?host=parent` (inside
+//! an `<iframe>`) talks to a same-origin parent page instead: it sends the document to open and
+//! stores what WordCraft saves (`host`), and `&author=` names the user for comments and tracked
+//! changes.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 #[cfg(target_arch = "wasm32")]
