@@ -1,9 +1,10 @@
 # Build WordCraft dla MyCRM Office — gałąź `mycrm` forka.
 #
 # Dwa zadania:
-#   web   — kompiluje aplikację przeglądarkową (WebAssembly) przez Trunk z `apps/wordcraft-web`
-#           i publikuje artefakt `wordcraft-web-<sha>` (pliki `dist/web` + `manifest.json`), który
-#           trafia do `mycrm-office/public/engines/word/<sha>/`.
+#   web   — kompiluje aplikację przeglądarkową (WebAssembly) przez Trunk z `apps/wordcraft-web`,
+#           publikuje artefakt `wordcraft-web-<sha>` (pliki `dist/web` + `manifest.json`) i wypycha te same
+#           pliki na gałąź `mycrm-dist` tego forka (jeden commit, nadpisywany) — stamtąd bierze je
+#           `mycrm-office/scripts/silniki-pobierz.sh` do `public/engines/word/<sha>/`.
 #   audit — `cargo audit` na Cargo.lock (znane luki w zależnościach); nie blokuje artefaktu, ale
 #           jest widoczny przy każdym buildzie i przy miesięcznej synchronizacji z upstreamem.
 #
@@ -16,7 +17,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 # Nowy push na gałąź przerywa poprzedni, jeszcze trwający build.
 concurrency:
@@ -73,6 +74,22 @@ jobs:
           path: dist/web
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish dist to branch mycrm-dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          SHA=$(git rev-parse HEAD)
+          rm -rf /tmp/mycrm-dist && mkdir /tmp/mycrm-dist && cd /tmp/mycrm-dist
+          git init -q -b mycrm-dist
+          git config user.name "mycrm-web (GitHub Actions)"
+          git config user.email "actions@users.noreply.github.com"
+          cp -r "$GITHUB_WORKSPACE/dist/web/." .
+          git add -A
+          git commit -q -m "build $ENGINE ze źródła $SHA"
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" mycrm-dist
+          echo "wypchnięto mycrm-dist (źródło $SHA)"
 
   audit:
     runs-on: ubuntu-latest
