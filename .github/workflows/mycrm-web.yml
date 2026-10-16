@@ -1,0 +1,85 @@
+# Build WordCraft dla MyCRM Office — gałąź `mycrm` forka.
+#
+# Dwa zadania:
+#   web   — kompiluje aplikację przeglądarkową (WebAssembly) przez Trunk z `apps/wordcraft-web`
+#           i publikuje artefakt `wordcraft-web-<sha>` (pliki `dist/web` + `manifest.json`), który
+#           trafia do `mycrm-office/public/engines/word/<sha>/`.
+#   audit — `cargo audit` na Cargo.lock (znane luki w zależnościach); nie blokuje artefaktu, ale
+#           jest widoczny przy każdym buildzie i przy miesięcznej synchronizacji z upstreamem.
+#
+# Budujemy wyłącznie z własnego, przypiętego commita; nigdy nie używamy gotowych binarek upstreamu.
+name: mycrm-web
+
+on:
+  push:
+    branches: [mycrm]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  ENGINE: word
+  APP_DIR: apps/wordcraft-web
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mycrm-web
+
+      - name: Install Trunk
+        run: |
+          set -eu
+          curl -sSL https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C /usr/local/bin trunk
+          trunk --version
+
+      - name: Build (trunk build --release)
+        working-directory: ${{ env.APP_DIR }}
+        run: trunk build --release
+
+      - name: Manifest
+        run: |
+          set -eu
+          DIST=dist/web
+          JS=$(ls $DIST/*.js | xargs -n1 basename | head -1)
+          WASM=$(ls $DIST/*_bg.wasm | xargs -n1 basename | head -1)
+          SHA=$(git rev-parse HEAD)
+          cat > $DIST/manifest.json <<EOF
+          {"engine":"$ENGINE","sha":"$SHA","shortSha":"${SHA:0:7}","builtAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","js":"$JS","wasm":"$WASM"}
+          EOF
+          echo "manifest:"; cat $DIST/manifest.json
+          echo "files:"; ls -la $DIST
+          echo "sha256:"; (cd $DIST && sha256sum "$JS" "$WASM")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wordcraft-web-${{ github.sha }}
+          path: dist/web
+          if-no-files-found: error
+          retention-days: 30
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mycrm-audit
+      - name: cargo audit
+        run: |
+          set -eu
+          cargo install cargo-audit --locked
+          cargo audit

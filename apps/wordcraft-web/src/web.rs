@@ -32,6 +32,10 @@ pub fn start() {
         if let Err(e) = guard_unload(dirty.clone(), saves.clone()) {
             log::error!("no unsaved-changes guard: {e}");
         }
+        // The embedding page owns the document: it opens and saves through `host.rs`.
+        let host = crate::host::enabled();
+        let host_dirty = dirty.clone();
+        let host_saves = saves.clone();
         let mut options = eframe::WebOptions::default();
         if query().contains("webgl")
             && let eframe::egui_wgpu::WgpuSetup::CreateNew(create) = &mut options.wgpu_options.wgpu_setup
@@ -61,15 +65,33 @@ pub fn start() {
                     let mut session = Session::new(doc);
                     session.system_region = region;
                     let messages = Rc::new(RefCell::new(Vec::new()));
-                    let mut app = WordApp::new(session, services(inbox.clone(), cc.egui_ctx.clone(), dirty, saves.clone(), messages.clone()));
+                    let mut services = services(inbox.clone(), cc.egui_ctx.clone(), dirty, saves.clone(), messages.clone());
+                    if host {
+                        // Saves and exports go to the host; documents come only from it (pictures,
+                        // fonts and recipient lists still come from the browser's picker).
+                        services.download = Some(Box::new(crate::host::download));
+                        let picker = services.open_async.take();
+                        services.open_async = Some(Box::new(move |purpose: &str| {
+                            if purpose == "document" {
+                                log::info!("host mode: File › Open is the host's; ignored");
+                                return;
+                            }
+                            if let Some(p) = &picker {
+                                p(purpose);
+                            }
+                        }));
+                    }
+                    let mut app = WordApp::new(session, services);
                     // Pasted pictures wait apart from dropped files: the app inserts one only when the page is the edit target (#1349).
                     app.services.pasted = Some(pasted);
                     app.autosave = false;
-                    // No document to show: start on File › Home, as the desktop app does (#766).
-                    if !sample {
+                    if host {
+                        crate::host::attach(inbox.clone(), cc.egui_ctx.clone(), host_saves, host_dirty);
+                    } else if !sample {
+                        // No document to show: start on File › Home, as the desktop app does (#766).
                         app.start_screen();
                     }
-                    Ok(Box::new(WebShell { app, inbox, messages }))
+                    Ok(Box::new(WebShell { app, inbox, messages, host }))
                 }),
             )
             .await;
@@ -86,22 +108,34 @@ fn query() -> String {
     web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default()
 }
 
+/// Whether a file name is a picture's (the formats Insert › Pictures takes).
+fn is_picture_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    IMAGE_EXTS.iter().any(|e| lower.ends_with(&format!(".{e}")))
+}
+
 /// Wraps the app to read dropped files asynchronously (browsers can't read them synchronously)
 /// and feed them through the inbox.
 struct WebShell {
     app: WordApp,
     inbox: Inbox,
     messages: Rc<RefCell<Vec<String>>>,
+    /// Host mode (`host.rs`): the page owns the document, so a dropped document is ignored.
+    host: bool,
 }
 
 impl eframe::App for WebShell {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let dropped = ctx.input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
         for f in dropped {
+            let name = f.path().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "dropped".into());
+            if self.host && !is_picture_name(&name) {
+                self.app.status(wordcraft_ui_egui::i18n::t("Open the document from the application, not by dropping it here"));
+                continue;
+            }
             let inbox = self.inbox.clone();
             let ctx = ctx.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                let name = f.path().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "dropped".into());
                 match f.bytes_async().await {
                     Ok(bytes) => {
                         inbox.lock().unwrap_or_else(|e| e.into_inner()).push((name, bytes));
@@ -114,6 +148,9 @@ impl eframe::App for WebShell {
         let msgs = std::mem::take(&mut *self.messages.borrow_mut());
         for msg in msgs {
             self.app.status(msg);
+        }
+        if self.host {
+            crate::host::drain_commands(&mut self.app);
         }
         self.app.logic(ctx);
     }

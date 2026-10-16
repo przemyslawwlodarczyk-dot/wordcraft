@@ -6,9 +6,12 @@
 //!
 //! Differences from the desktop app: no TCP control channel; Open and Insert › Pictures use the
 //! browser file picker (bytes arrive through `Services::inbox`); Save and Export download.
-//! URL flags: `?webgl` forces WebGL2; `?sample` opens the sample document.
+//! URL flags: `?webgl` forces WebGL2; `?sample` opens the sample document; `?host=1` lets the
+//! embedding page supply the document and take the saves (see `host.rs`).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+#[cfg(target_arch = "wasm32")]
+mod host;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
